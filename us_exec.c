@@ -55,6 +55,25 @@ void my_exit(long status)
 		"syscall" : : "r"(status));
 }
 
+int my_munmap(void *start, unsigned long length)
+{
+	long ret;
+	__asm__ volatile(
+		"mov %0, %%rdi\n"
+		"mov %1, %%rsi\n"
+		"mov $11, %%rax\n"
+		"syscall" : : "g"(start), "g"(length));
+	asm("mov %%rax, %0" : "=r"(ret));
+	return (int)ret;
+}
+
+void my_pause()
+{
+	__asm__ volatile(
+		"mov $34, %%rax\n"
+		"syscall" : :);
+}
+
 char *strchr(const char *s, int c)
 {
 	char *r = 0;
@@ -162,14 +181,29 @@ unsigned long int strtoul(char *nptr, char **endptr, int base)
 	return ret;
 }
 
+char *strrchr(char *s, int c)
+{
+	char *r = 0;
+	char *p;
+	p = &s[strlen(s)-1];
+	for (;p!=s;--p)
+	{
+		if (*p==c)
+		{
+			r = (char *)p;
+			break;
+		}
+	}
+	return r;
+}
 
 void us_exec(int argc, char **argv, char **env){
 	char buf[1024], *p;
 	char rbuf[2048];
 	int cc, fd;
-
 	fd = my_open("/proc/self/maps", 0, 0);
-	
+	//这里需要找到不包含路径的文件名，因为可能是使用相对地址比如./main
+	char *s = strrchr(argv[0], '/');
 	p = &buf[0];
 	while (0 < (cc = my_read(fd, rbuf, sizeof(rbuf)))){
 		int i;
@@ -180,8 +214,7 @@ void us_exec(int argc, char **argv, char **env){
 				*p++ = c;
 			else {
 				*p = '\0';
-				if(!strstr(buf, "libdl")){
-					
+				if(strstr(buf, "libdl")){ //|| strstr(buf, s) || strstr(buf, "libc") || strstr(buf, "ld")){
 					char *u;
 					char *first, *second;
 					unsigned long low, high;
@@ -193,19 +226,21 @@ void us_exec(int argc, char **argv, char **env){
 					++second;
 					low = strtoul(first, 0, 0x10);
 					high = strtoul(second, 0, 0x10);
-
+					
+					//打印maps文件的内容
 					write(1,buf,p-buf);
 					char ff[1] = {'\n'};
 					write(1,ff,1);
-
 					
+					my_munmap((void *)low, high-low);
 				}
 				p = &buf[0];
 			}
 		}
 	}
 	my_close(fd);
-
+	my_pause();
+	my_exit(0);
 	/*
 	char tmp[10];
 	my_write(1,my_itoa(argc,tmp),1);

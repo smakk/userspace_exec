@@ -4,6 +4,7 @@
 #include <string.h>
 #include <dlfcn.h>
 #include <sys/mman.h>
+#include <unistd.h>
 
 int main(int argc, char **argv, char **envp){
 	//void * fd = malloc(1024*1024);
@@ -19,6 +20,9 @@ int main(int argc, char **argv, char **envp){
 		printf("[main]:open us_exec wrong\n");
 		exit(1);
 	}
+	//打印pid，暂停一段时间，这样可以根据pid来查看进程的map文件，观察进程空间布局情况，检查map和munmap的执行情况
+	printf("[main]:pid is %d\n", getpid());
+	//sleep(60);
 	us_exec(argc, argv, envp);
 
 	/*
