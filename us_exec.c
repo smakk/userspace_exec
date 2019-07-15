@@ -3,6 +3,7 @@
 #include <sys/mman.h>
 
 #define ROUNDUP(x, y)   ((((x)+((y)-1))/(y))*(y))
+#define ALIGN(k, v) (((k)+((v)-1))&(~((v)-1)))
 #define ALIGNDOWN(k, v) ((unsigned long)(k)&(~((unsigned long)(v)-1)))
 
 char * itoa(long x, char *t);
@@ -261,6 +262,208 @@ void *memcpy(void *dest, const void *src, unsigned long n)
     return dest;
 }
 
+int to_hex(unsigned long n, char *p){
+	int i;
+	int count = 0;
+	for (i = 0; i < 16; ++i){
+		char x = ((n >> 60)  & 0xf);
+		if (x < (char)10)
+			*p++ = x + '0';
+		else
+			*p++ = (x - 10) + 'a';
+		++count;
+		n <<= 4;
+	}
+	*p = '\0';
+	return count;
+}
+
+int to_decimal(unsigned long x, char *p){
+	int count = 0;
+	if (x == 0)
+		*p++ ='0';
+	else {
+		unsigned long q, r, b;
+		int f = 0;
+		b = 10000000000000000000U;
+		do {
+			q = x/b;
+			if (q || f){
+				*p++ = ('0' + q);
+				++count;
+				f = 1;
+				x = x%b;
+			}
+			b /= 10;
+		} while (b > 0);
+	}
+	*p = '\0';
+	return count;
+}
+
+struct saved_block {
+	int size;
+	int cnt;
+	char *block;
+};
+
+#define ALLOCATE(size)  \
+	my_mmap(0, (size), PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0)
+
+struct saved_block *save_argv(int argc, char **argv)
+{
+	struct saved_block *r = 0;
+	int i, len;
+	char *str;
+	//len是所有字符串的长度
+	if (argc > 0){
+		for (i = 0, len = 0; i < argc; ++i){
+			len += strlen(argv[i]) + 1;
+		}
+	}else {
+		argc = 0;
+		char **p = argv;
+		while (*p){
+			len += strlen(*p) + 1;
+			++p;
+			++argc;
+		}
+	}
+	r = ALLOCATE(sizeof(*r));
+	r->size = len;
+	r->cnt = argc;
+	r->block = ALLOCATE(len);
+
+	for (i = 0, str = r->block; i < argc; i++){
+		int j;
+		for (j = 0; argv[i][j]; ++j)
+			str[j] = argv[i][j];
+		str[j] = '\0';
+		str += (j + 1);
+	}
+
+	return r;
+}
+
+struct saved_block * save_elfauxv(char **envp)
+{
+	struct saved_block *r;
+	unsigned long *p;
+	int cnt;
+	Elf64_auxv_t *q;
+	p = (unsigned long *)envp;
+	while (*p != 0)
+		++p;
+	++p;
+	for (cnt = 0, q = (Elf64_auxv_t *)p; q->a_type != AT_NULL; ++q)
+		++cnt;
+	++cnt;
+	r = ALLOCATE(sizeof(*r));
+	r->size = sizeof(*q) * cnt;
+	r->cnt = cnt;
+	r->block = ALLOCATE(r->size);
+	memcpy((void *)r->block, (void *)p, r->size);
+	return r;
+}
+
+void release_args(struct saved_block *args)
+{
+	my_munmap((void *)args->block, args->size);
+	my_munmap((void *)args, sizeof(*args));
+}
+
+void *stack_setup(struct saved_block *args,struct saved_block *envp,struct saved_block *auxvp,Elf64_Ehdr *ehdr,Elf64_Ehdr *ldso)
+{
+	Elf64_auxv_t	*aux, *excfn = 0;
+	char **av, **ev;
+	char	*addr, *str, *rsp;
+	unsigned long *ptr;
+	int	  i, j;
+	char newstack[16*1024];
+
+	rsp = (char *)(unsigned long)ALIGN(((unsigned long)(&newstack[150])), 16);
+
+	ptr = (unsigned long *)rsp;
+
+	*ptr++ = args->cnt;
+	av = (char **)ptr;
+	ptr += args->cnt;
+	*ptr++ = 0;
+
+	ev = (char **)ptr;
+	ptr += envp->cnt;
+	*ptr++ = 0;
+
+	aux = (Elf64_auxv_t *)ptr;
+
+	ptr = (unsigned long *)ROUNDUP((unsigned long)ptr + auxvp->size, sizeof(unsigned long));
+	
+	addr =  (char *)aux;
+	for (j = 0; j < auxvp->size; ++j)
+		addr[j] = auxvp->block[j];
+
+	//重新设置一些辅助向量
+	for (i = 0; i < auxvp->cnt; ++i)
+	{
+		switch (aux[i].a_type)
+		{
+		case AT_PHDR:  aux[i].a_un.a_val = (unsigned long)((char *)ehdr + ehdr->e_phoff); break;
+		case AT_PHNUM: aux[i].a_un.a_val = ehdr->e_phnum; break;
+		case AT_BASE:  aux[i].a_un.a_val = (unsigned long)ldso; break;
+		case AT_ENTRY: aux[i].a_un.a_val = (unsigned long)ehdr->e_entry; break;
+		}
+	}
+
+	*ptr++ = 0;
+
+	addr =  (char *)ptr;
+	str = args->block;
+
+	for (i = 0; i < args->cnt; ++i)
+	{
+		av[i] = addr;
+		for (j = 0; *str; ++j)
+			*addr++ = *str++;
+		*addr++ = *str++;
+	}
+
+	ptr = (unsigned long *)ROUNDUP((unsigned long)addr, sizeof(unsigned long));
+	*ptr = 0;
+
+	addr =  (char *)ptr;
+	str = envp->block;
+
+	for (i = 0; i < envp->cnt; ++i)
+	{
+		ev[i] = addr;
+		for (j = 0; *str; ++j)
+			*addr++ = *str++;
+		*addr++ = *str++;
+	}
+
+	ptr = (unsigned long *)ROUNDUP((unsigned long)addr, sizeof(unsigned long));
+	*ptr = 0;
+
+	if (excfn)
+	{
+		addr =  (char *)ptr;
+		str = args->block;
+		excfn->a_un.a_val = (unsigned long)addr;
+		for (j = 0; *str; ++j)
+			*addr++ = *str++;
+		*addr++ = *str++;
+
+		ptr = (unsigned long *)ROUNDUP((unsigned long)addr, sizeof(unsigned long));
+	}
+
+	release_args(args);
+	release_args(envp);
+	release_args(auxvp);
+
+	return ((void *)rsp);
+}
+
+
 void *load_elf(char *mapped, int anywhere, Elf64_Ehdr **elf_ehdr, Elf64_Ehdr **ldso_ehdr)
 {
 	Elf64_Ehdr *hdr;
@@ -323,7 +526,7 @@ void *load_elf(char *mapped, int anywhere, Elf64_Ehdr **elf_ehdr, Elf64_Ehdr **l
 		rounded_len = (unsigned long)pdr->p_memsz + ((unsigned long)pdr->p_vaddr % 0x1000);
 		rounded_len = ROUNDUP(rounded_len, 0x1000);
 
-		segment = my_mmap((void *)map_addr,rounded_len,PROT_WRITE, mapflags, -1, 0);
+		segment = my_mmap((void *)map_addr,rounded_len,PROT_WRITE|PROT_READ|PROT_EXEC, mapflags, -1, 0);
 		/*
 		char tmp[20];
 		my_write(1, itoa((unsigned long)map_addr,tmp), strlen(tmp));
@@ -345,20 +548,20 @@ void *load_elf(char *mapped, int anywhere, Elf64_Ehdr **elf_ehdr, Elf64_Ehdr **l
 
 		if (pdr->p_flags & PF_R){
 			protflags |= PROT_READ;
-			my_write(1,"www\n",4);
+			//my_write(1,"www\n",4);
 		}
 		if (pdr->p_flags & PF_W){
 			protflags |= PROT_WRITE;
-			my_write(1,"eee\n",4);
+			//my_write(1,"eee\n",4);
 		}
 		if (pdr->p_flags & PF_X){
 			protflags |= PROT_EXEC;
-			my_write(1,"rrr\n",4);
+			//my_write(1,"rrr\n",4);
 		}
 
 		int pro_ret = my_mprotect(segment, rounded_len, protflags);
 		if(pro_ret<0){
-			my_write(1,"mprotect wrong\n",15);
+			//my_write(1,"mprotect wrong\n",15);
 		}
 
 		k = pdr->p_vaddr + pdr->p_memsz;
@@ -432,7 +635,7 @@ void us_exec(int argc, char **argv, char **env){
 	}
 	my_close(fd);
 	//map新的文件
-	int newfd = my_open("/bin/ls",0,0);
+	int newfd = my_open(argv[1],0,0);
 	struct stat st;
 	if(my_stat(newfd, &st)<0){
 		my_write(1,"stat wrong\n",11);
@@ -460,6 +663,19 @@ void us_exec(int argc, char **argv, char **env){
 	Elf64_Ehdr *ldso_ehdr;
 	void *entry_point = load_elf(new_file, how_to_map, &ehdr, &ldso_ehdr);
 	my_munmap(new_file, st.st_size);
+
+	//设置栈的参数
+	/*
+	栈底的布局应该是参数个数、参数数组、环境变量数组，辅助向量结构Elf64_auxv_t数组
+	*/
+	
+	struct saved_block *argvb = save_argv(argc - 1, &argv[1]);
+	struct saved_block *envb = save_argv(0, env);
+	struct saved_block *elfauxvb = save_elfauxv(env);
+	void *stack_bottom = stack_setup(argvb, envb, elfauxvb, ehdr, ldso_ehdr);
+	
+	__asm__ volatile("movq %0, %%rsp\n" :: "r"(stack_bottom));
+	__asm__ volatile("jmp  *%0\n" :: "r" (entry_point));
 
 	//pause，用来查看地址空间的情况
 	my_pause();
