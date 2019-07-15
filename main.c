@@ -13,6 +13,7 @@ int main(int argc, char **argv, char **envp){
 	void *lib_us_exec = dlopen("./us_exec.so", RTLD_NOW | RTLD_DEEPBIND);
 	if(!lib_us_exec){
 		printf("[main]:open lib wrong\n");
+		printf("[main]:dlopen err:%s.\n",dlerror());
 		exit(1);
 	}
 	us_exec = (void (*)(int, char **, char **))dlsym(lib_us_exec, "us_exec");
