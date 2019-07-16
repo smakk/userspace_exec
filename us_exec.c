@@ -444,18 +444,6 @@ void *stack_setup(struct saved_block *args,struct saved_block *envp,struct saved
 	ptr = (unsigned long *)ROUNDUP((unsigned long)addr, sizeof(unsigned long));
 	*ptr = 0;
 
-	if (excfn)
-	{
-		addr =  (char *)ptr;
-		str = args->block;
-		excfn->a_un.a_val = (unsigned long)addr;
-		for (j = 0; *str; ++j)
-			*addr++ = *str++;
-		*addr++ = *str++;
-
-		ptr = (unsigned long *)ROUNDUP((unsigned long)addr, sizeof(unsigned long));
-	}
-
 	release_args(args);
 	release_args(envp);
 	release_args(auxvp);
@@ -609,7 +597,7 @@ void us_exec(int argc, char **argv, char **env){
 				*p++ = c;
 			else {
 				*p = '\0';
-				if(strstr(buf, "libdl") || strstr(buf, s) || strstr(buf, "libc") || strstr(buf, "ld")){
+				if(strstr(buf, "libdl") || strstr(buf, s) || strstr(buf, "libc") || strstr(buf, "ld") || strstr(buf, "heap")){
 					char *u;
 					char *first, *second;
 					unsigned long low, high;
